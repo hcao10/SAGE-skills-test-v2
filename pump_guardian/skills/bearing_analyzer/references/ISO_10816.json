@@ -1,0 +1,39 @@
+{
+  "standard": "ISO 10816",
+  "class": "Class II",
+  "unit": "mm/s",
+  "zones": [
+    {
+      "zone": "A",
+      "severity": "GOOD",
+      "min_inclusive": 0.0,
+      "max_exclusive": 2.8,
+      "recommendation": "No action required. Continue routine monitoring.",
+      "spare_parts": ["None"]
+    },
+    {
+      "zone": "B",
+      "severity": "SATISFACTORY",
+      "min_inclusive": 2.8,
+      "max_exclusive": 4.5,
+      "recommendation": "Plan follow-up inspection in regular maintenance window.",
+      "spare_parts": ["Grease cartridge"]
+    },
+    {
+      "zone": "C",
+      "severity": "ALERT",
+      "min_inclusive": 4.5,
+      "max_exclusive": 7.1,
+      "recommendation": "Schedule corrective maintenance and inspect bearing condition.",
+      "spare_parts": ["Bearing set", "Seal kit", "Lubricant"]
+    },
+    {
+      "zone": "D",
+      "severity": "DANGER",
+      "min_inclusive": 7.1,
+      "max_exclusive": 1000.0,
+      "recommendation": "Immediate intervention required. Prepare controlled shutdown.",
+      "spare_parts": ["Bearing set", "Shaft sleeve", "Seal kit", "Lubricant"]
+    }
+  ]
+}
