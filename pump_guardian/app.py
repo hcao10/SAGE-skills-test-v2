@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -12,17 +13,27 @@ import streamlit as st
 
 from core.config import (
     config_diagnostics,
+    iter_config_check_paths,
     load_minimax_config_files,
     merge_streamlit_secrets_into_environ,
     minimax_api_key,
 )
+from core.i18n import t
+from core.llm_parse import try_parse_fft_from_llm_text, try_parse_workorder_from_llm_text
+from core.router import run_general_ai_mode, run_skill_agent_mode
+from data.generator import generate_synthetic_vibration
 
 _APP_DIR = Path(__file__).resolve().parent
 load_minimax_config_files(_APP_DIR)
+SAMPLE_CSV = _APP_DIR / "data" / "samples" / "bearing_fault_81hz_demo.csv"
 
-from core.i18n import t
-from core.router import run_general_ai_mode, run_skill_agent_mode
-from data.generator import generate_synthetic_vibration
+
+def _load_skill_playbook(locale: str) -> str:
+    name = "skill_playbook_zh.md" if locale == "zh" else "skill_playbook_en.md"
+    path = _APP_DIR / "docs" / name
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return ""
 
 
 def _style_app(page_title: str) -> None:
@@ -124,21 +135,74 @@ def _fft_figure(
     return fig
 
 
+def _render_llm_content(result: dict, locale: str) -> None:
+    exchanges: List[Dict[str, Any]] = result.get("llm_exchanges") or []
+    if not exchanges:
+        st.caption("—")
+        return
+    for ex in exchanges:
+        st.markdown(f"#### {ex.get('title', 'LLM')}")
+        st.caption(f"{t('llm_model_label', locale)} `{ex.get('model', '')}`")
+        messages = ex.get("messages") or []
+        with st.expander(t("llm_request_json", locale), expanded=False):
+            st.code(json.dumps(messages, ensure_ascii=False, indent=2), language="json")
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        other_msgs = [m for m in messages if m.get("role") != "system"]
+        if system_msgs:
+            with st.expander(t("llm_role_system", locale), expanded=False):
+                st.markdown(system_msgs[0].get("content", ""))
+        for m in other_msgs:
+            role = m.get("role", "user")
+            if role not in ("user", "assistant"):
+                role = "user"
+            with st.chat_message(role):
+                st.markdown(m.get("content", ""))
+        with st.chat_message("assistant"):
+            if ex.get("error"):
+                st.error(str(ex["error"]))
+            if not ex.get("api_called"):
+                st.caption(t("llm_not_called", locale))
+            resp = (ex.get("response") or "").strip()
+            if resp:
+                st.markdown(resp)
+            elif not ex.get("error"):
+                st.caption("—")
+        st.divider()
+
+
 def _render_general_mode(center_tabs: Tuple, result: dict, locale: str) -> None:
     tab_summary, tab_fft, tab_wo = center_tabs
+    summary_text = result.get("summary") or ""
+    parsed_fft = try_parse_fft_from_llm_text(summary_text)
+    parsed_wo = try_parse_workorder_from_llm_text(summary_text)
+
     with tab_summary:
-        st.warning(t("general_banner", locale))
+        st.info(t("general_banner", locale))
         if not minimax_api_key():
-            st.info(t("no_api_key", locale))
+            st.warning(t("no_api_key", locale))
         st.markdown(f"### {t('llm_summary', locale)}")
-        st.write(result["summary"])
-        st.info(t("general_hint", locale))
+        st.markdown(summary_text)
 
     with tab_fft:
-        st.info(t("general_no_fft", locale))
+        if parsed_fft:
+            st.success(t("general_fft_from_llm", locale))
+            fig = _fft_figure(
+                freqs=parsed_fft["frequencies"],
+                amps=parsed_fft["amplitudes"],
+                peak_f=parsed_fft["peak_frequency"],
+                peak_a=parsed_fft["peak_amplitude"],
+                locale=locale,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning(t("general_fft_none", locale))
 
     with tab_wo:
-        st.info(t("general_no_wo", locale))
+        if parsed_wo:
+            st.success(t("general_wo_from_llm", locale))
+            st.markdown(parsed_wo)
+        else:
+            st.warning(t("general_wo_none", locale))
 
 
 def _render_skill_mode(center_tabs: Tuple, result: dict, equipment_id: str, locale: str) -> None:
@@ -168,13 +232,6 @@ def _render_skill_mode(center_tabs: Tuple, result: dict, equipment_id: str, loca
         )
         st.write(f"{t('recommendation', locale)}: {metrics['recommendation']}")
         st.write(f"{t('spare_parts', locale)}: {metrics['spare_parts']}")
-
-        summary_text = result.get("llm_summary") or ""
-        if summary_text.strip():
-            st.markdown(f"### {t('skill_llm_summary', locale)}")
-            st.write(summary_text)
-        elif not minimax_api_key():
-            st.caption(t("trace_llm_syn_skip", locale))
 
     with tab_fft:
         fig = _fft_figure(
@@ -221,6 +278,18 @@ def main() -> None:
         )
         if session_key.strip():
             os.environ["MINIMAX_API_KEY"] = session_key.strip()
+
+        with st.expander(t("config_files_title", locale), expanded=False):
+            lines = []
+            for label, p in iter_config_check_paths(_APP_DIR):
+                try:
+                    ok = p.resolve().is_file()
+                except OSError:
+                    ok = False
+                mark = "OK" if ok else "—"
+                lines.append(f"[{mark}] {label}\n    {p}")
+            st.code("\n".join(lines), language="text")
+
         if st.checkbox(t("api_show_key_status", locale), key="pg_api_show_key_status"):
             st.write(
                 t("api_status_ok", locale)
@@ -237,7 +306,11 @@ def main() -> None:
     st.markdown(f"<div class='main-title'>{page_title}</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='subtitle'>{t('subtitle', locale)}</div>", unsafe_allow_html=True)
 
-    left_col, center_col, right_col = st.columns([1.05, 1.9, 1.25], gap="large")
+    left_col, center_col, llm_col, right_col = st.columns([1.0, 1.35, 1.15, 1.05], gap="medium")
+
+    with llm_col:
+        st.subheader(t("llm_io_title", locale))
+        llm_area = st.container()
 
     with left_col:
         st.subheader(t("input_mode", locale))
@@ -253,6 +326,17 @@ def main() -> None:
 
         uploaded_file = st.file_uploader(t("upload_csv", locale), type=["csv"])
         st.caption(t("csv_caption", locale))
+
+        st.markdown(f"#### {t('sample_csv_title', locale)}")
+        st.caption(t("sample_csv_hint", locale))
+        if SAMPLE_CSV.is_file():
+            st.download_button(
+                t("sample_csv_download", locale),
+                data=SAMPLE_CSV.read_bytes(),
+                file_name=SAMPLE_CSV.name,
+                mime="text/csv",
+                key="pg_dl_sample_csv",
+            )
 
         st.markdown(f"#### {t('demo_signal', locale)}")
         use_harmonic = st.checkbox(t("harmonic", locale), value=True)
@@ -275,11 +359,23 @@ def main() -> None:
         trace_placeholder = st.empty()
         trace_placeholder.info(t("trace_waiting", locale))
 
+        with st.expander(t("skill_playbook_expander", locale), expanded=False):
+            body = _load_skill_playbook(locale)
+            if body.strip():
+                st.markdown(body)
+            else:
+                st.caption("—")
+
     if not run_clicked:
+        with llm_area:
+            st.caption(t("llm_io_placeholder", locale))
         return
 
     project_root = Path(__file__).resolve().parent
     has_csv_upload = uploaded_file is not None
+
+    trace_placeholder.success(t("diagnosis_started", locale))
+    time.sleep(0.25)
 
     try:
         if mode_internal == "general":
@@ -290,6 +386,8 @@ def main() -> None:
             )
             _render_trace(result["trace"], trace_placeholder)
             _render_general_mode(tabs, result, locale)
+            with llm_area:
+                _render_llm_content(result, locale)
             return
 
         data = _load_input_data(uploaded_file, use_harmonic, noise_level)
@@ -301,6 +399,8 @@ def main() -> None:
         )
         _render_trace(result["trace"], trace_placeholder)
         _render_skill_mode(tabs, result, equipment_id, locale)
+        with llm_area:
+            _render_llm_content(result, locale)
     except Exception as exc:
         st.error(f"{t('exec_failed', locale)}: {exc}")
 

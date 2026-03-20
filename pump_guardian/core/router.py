@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import pandas as pd
 
@@ -34,32 +34,52 @@ def _general_llm_prompts(
     locale: str,
     has_csv_upload: bool,
 ) -> tuple[str, str]:
+    """
+    General path uses the same professional persona as the skill-backed advisor, but the
+    user message intentionally omits raw samples / tool outputs / standard tables. We do
+    not instruct the model that it is “blocked” from tools—fairness comes from what is
+    (not) included in the message, not from meta disclaimers in the system prompt.
+    """
     if locale == "zh":
         system = (
-            "你是通用助手，无法使用振动分析工具、FFT、ISO 10816 标准库或工单系统。"
-            "不要编造任何 RMS、主频、ISO 分区或具体测量值。"
+            "你是工厂设备管理顾问，熟悉旋转机械与现场运维。"
+            "请仅依据用户消息中给出的信息作答：给出清晰、可执行的建议。"
+            "若关键测量数据或记录未在消息中出现，请明确不确定性，并列出建议补采的数据项与排查步骤；"
+            "避免把未经提供的采样结果写成确定数值结论。"
         )
         user_msg = f"设备编号：{equipment_id}。\n"
         if has_csv_upload:
-            user_msg += "用户声称上传了振动 CSV，但你无法读取其中的数值序列。\n"
+            user_msg += (
+                "现场反馈振动偏高，已完成 time/amplitude 振动采样并整理为 CSV。\n"
+                "请结合常见工业实践给出初步判断方向、风险定性、以及下一步测试与记录要点。\n"
+            )
         else:
-            user_msg += "当前为演示场景，用户未上传文件。\n"
-        user_msg += "请用 2~4 句中文给出非常笼统的设备维护建议，避免结构化字段与具体指标。"
+            user_msg += (
+                "现场反馈振动异常。\n"
+                "请结合常见工业实践给出初步判断方向、风险定性、以及下一步测试与记录要点。\n"
+            )
         return system, user_msg
 
     system = (
-        "You are a generic assistant without vibration tools, FFT, ISO 10816 reference data, "
-        "or CMMS. Do not invent RMS, peak frequency, ISO zones, or any numeric measurements."
+        "You are an industrial plant equipment advisor with experience in rotating machinery "
+        "maintenance. Answer using only the information present in the user message. "
+        "If key measurements or records are not included, state uncertainty clearly and list "
+        "what to collect next; avoid presenting specific numeric diagnostics as measured facts "
+        "when those values were not provided."
     )
     user_msg = f"Equipment ID: {equipment_id}.\n"
     if has_csv_upload:
-        user_msg += "The user says they uploaded a vibration CSV, but you cannot see numeric samples.\n"
+        user_msg += (
+            "Field report: elevated vibration; time/amplitude samples were recorded as a CSV.\n"
+            "Using common industrial practice, outline likely directions, qualitative risk framing, "
+            "and next diagnostic steps.\n"
+        )
     else:
-        user_msg += "Demo scenario: no file was uploaded.\n"
-    user_msg += (
-        "Reply in 2-4 short sentences with vague maintenance guidance only. "
-        "No structured fields, no standards citations."
-    )
+        user_msg += (
+            "Field report: abnormal vibration.\n"
+            "Using common industrial practice, outline likely directions, qualitative risk framing, "
+            "and next diagnostic steps.\n"
+        )
     return system, user_msg
 
 
@@ -72,7 +92,7 @@ def _skill_llm_prompts(
     if locale == "zh":
         system = (
             "你是工厂设备管理顾问。以下字段来自工业技能流水线（本地脚本 + ISO JSON + 模板），"
-            "数据可信。请写 3~5 句中文摘要，语气专业，供厂长快速决策。"
+            "数据可信。请用 3~6 句中文摘要，语气专业，供厂长快速决策。"
         )
         user_msg = (
             f"设备：{equipment_id}\n"
@@ -89,7 +109,7 @@ def _skill_llm_prompts(
     system = (
         "You are an industrial reliability advisor. The following fields were produced by a "
         "skill-enabled pipeline (local scripts + ISO JSON + template) and are trustworthy. "
-        "Write a concise 3-5 sentence executive summary for a plant manager."
+        "Write a concise 3-6 sentence executive summary for a plant manager."
     )
     user_msg = (
         f"Equipment: {equipment_id}\n"
@@ -112,11 +132,20 @@ def run_general_ai_mode(
 ) -> Dict[str, Any]:
     trace = AgentTrace()
     model = _minimax_model()
+    od = t("on_demand", locale)
 
     trace.start(t("stage_general_ai", locale), t("trace_gen_start", locale))
 
     summary: str
     llm_used = False
+    api_error: str | None = None
+    system_msg, user_msg = _general_llm_prompts(
+        equipment_id, locale=locale, has_csv_upload=has_csv_upload
+    )
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ]
 
     if not _has_minimax_key():
         trace.done(
@@ -127,22 +156,17 @@ def run_general_ai_mode(
     else:
         trace.start(
             t("stage_llm_inference", locale),
-            t("trace_gen_llm_call", locale),
-        )
-        system_msg, user_msg = _general_llm_prompts(
-            equipment_id, locale=locale, has_csv_upload=has_csv_upload
+            t("trace_gen_llm_call_model", locale).format(model=model),
         )
         try:
             summary = chat_completion(
-                [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ],
+                messages,
                 model=model,
             )
             llm_used = True
             trace.done(t("stage_llm_inference", locale), t("trace_gen_llm_ok", locale))
         except Exception as exc:
+            api_error = str(exc)
             trace.error(
                 t("stage_llm_inference", locale),
                 f"{t('trace_gen_api_fail', locale)} ({exc})",
@@ -151,10 +175,22 @@ def run_general_ai_mode(
 
     trace.done(t("stage_general_ai", locale), t("trace_gen_complete", locale))
 
+    llm_exchanges: List[Dict[str, Any]] = [
+        {
+            "title": t("llm_exchange_general", locale),
+            "model": model,
+            "messages": messages,
+            "response": summary,
+            "api_called": bool(_has_minimax_key()) and (llm_used or api_error is not None),
+            "error": api_error,
+        }
+    ]
+
     return {
         "mode": "general",
         "summary": summary,
         "llm_used": llm_used,
+        "llm_exchanges": llm_exchanges,
         "trace": trace.to_dicts(),
     }
 
@@ -192,47 +228,53 @@ def run_skill_agent_mode(
     skills_root = project_root / "skills"
     od = t("on_demand", locale)
 
-    trace.start(t("stage_skill_discovery", locale), f"{od} Scanning skill registry metadata...")
+    trace.start(t("stage_skill_discovery", locale), f"{od} {t('trace_scan_registry', locale)}")
     skills = discover_skills(skills_root)
-    trace.done(t("stage_skill_discovery", locale), f"Found {len(skills)} skill(s).")
+    trace.done(t("stage_skill_discovery", locale), t("trace_found_skills_n", locale).format(n=len(skills)))
 
     if not skills:
-        trace.error(t("stage_skill_discovery", locale), "No skill available.")
+        trace.error(t("stage_skill_discovery", locale), t("trace_no_skill", locale))
         raise RuntimeError("No skills discovered in skills directory.")
 
     skill_dir = skills_root / "bearing_analyzer"
 
-    trace.start(t("stage_progressive_disclosure", locale), f"{od} Loading SKILL.md...")
+    trace.start(t("stage_progressive_disclosure", locale), f"{od} {t('trace_load_skill_md', locale)}")
     skill_doc = load_skill_markdown(skill_dir)
     trace.done(
         t("stage_progressive_disclosure", locale),
-        f"{od} Loaded skill doc ({len(skill_doc)} chars).",
+        t("trace_loaded_skill_chars", locale).format(n=len(skill_doc)),
     )
 
-    trace.start(t("stage_script_execution", locale), f"{od} Loading diag_tool.py...")
+    trace.start(t("stage_script_execution", locale), f"{od} {t('trace_load_diag_tool', locale)}")
     diag_tool = load_diag_tool(skill_dir)
-    trace.done(t("stage_script_execution", locale), f"{od} Diagnostic module loaded.")
+    trace.done(t("stage_script_execution", locale), t("trace_diag_tool_ready", locale))
 
-    trace.start(t("stage_script_execution", locale), "Running RMS + FFT analysis locally...")
+    trace.start(t("stage_script_execution", locale), t("trace_running_fft", locale))
     analysis = diag_tool.analyze_signal(data)
     trace.done(
         t("stage_script_execution", locale),
-        f'Computed RMS={analysis["rms"]:.2f} mm/s, peak={analysis["peak_frequency"]:.2f} Hz.',
+        t("trace_fft_done", locale).format(
+            rms=analysis["rms"],
+            peak=analysis["peak_frequency"],
+        ),
     )
 
-    trace.start(t("stage_reference_retrieval", locale), f"{od} Loading ISO_10816.json...")
+    trace.start(t("stage_reference_retrieval", locale), f"{od} {t('trace_load_iso', locale)}")
     iso_ref = load_reference_json(skill_dir, "ISO_10816.json")
-    trace.done(t("stage_reference_retrieval", locale), f"{od} ISO thresholds loaded.")
+    trace.done(t("stage_reference_retrieval", locale), t("trace_iso_ready", locale))
 
     classification = _classify_with_iso(analysis["rms"], iso_ref)
     trace.done(
         t("stage_reference_retrieval", locale),
-        f'Classified as {classification["severity"]} in {classification["zone"]} zone.',
+        t("trace_iso_classified", locale).format(
+            sev=classification["severity"],
+            zone=classification["zone"],
+        ),
     )
 
-    trace.start(t("stage_asset_rendering", locale), f"{od} Loading wo_template.md...")
+    trace.start(t("stage_asset_rendering", locale), f"{od} {t('trace_load_template', locale)}")
     template = load_asset_template(skill_dir, "wo_template.md")
-    trace.done(t("stage_asset_rendering", locale), f"{od} Template loaded.")
+    trace.done(t("stage_asset_rendering", locale), t("trace_template_ready", locale))
 
     payload = {
         "equipment_id": equipment_id,
@@ -246,7 +288,7 @@ def run_skill_agent_mode(
         "iso_evidence": classification["threshold_text"],
     }
     work_order_md = render_work_order(template, payload)
-    trace.done(t("stage_asset_rendering", locale), "Work order rendered.")
+    trace.done(t("stage_asset_rendering", locale), t("trace_wo_rendered", locale))
 
     metrics_dict: Dict[str, Any] = {
         "rms": analysis["rms"],
@@ -261,30 +303,47 @@ def run_skill_agent_mode(
 
     llm_summary = ""
     model = _minimax_model()
+    system_msg, user_msg = _skill_llm_prompts(
+        locale=locale,
+        equipment_id=equipment_id,
+        metrics=metrics_dict,
+    )
+    syn_messages: List[Dict[str, str]] = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ]
+    syn_error: str | None = None
+    syn_called = False
+
     if not _has_minimax_key():
         trace.done(t("stage_llm_synthesis", locale), t("trace_llm_syn_skip", locale))
     else:
         trace.start(t("stage_llm_synthesis", locale), t("trace_llm_syn_start", locale))
-        system_msg, user_msg = _skill_llm_prompts(
-            locale=locale,
-            equipment_id=equipment_id,
-            metrics=metrics_dict,
-        )
         try:
             llm_summary = chat_completion(
-                [
-                    {"role": "system", "content": system_msg},
-                    {"role": "user", "content": user_msg},
-                ],
+                syn_messages,
                 model=model,
             )
+            syn_called = True
             trace.done(t("stage_llm_synthesis", locale), t("trace_llm_syn_ok", locale))
         except Exception as exc:
+            syn_error = str(exc)
             trace.error(
                 t("stage_llm_synthesis", locale),
                 f"{t('trace_llm_syn_fail', locale)} ({exc})",
             )
             llm_summary = ""
+
+    llm_exchanges: List[Dict[str, Any]] = [
+        {
+            "title": t("llm_exchange_skill_summary", locale),
+            "model": model,
+            "messages": syn_messages,
+            "response": llm_summary,
+            "api_called": bool(_has_minimax_key()) and (syn_called or syn_error is not None),
+            "error": syn_error,
+        }
+    ]
 
     return {
         "mode": "skill",
@@ -297,5 +356,6 @@ def run_skill_agent_mode(
         },
         "work_order_md": work_order_md,
         "llm_summary": llm_summary,
+        "llm_exchanges": llm_exchanges,
         "trace": trace.to_dicts(),
     }

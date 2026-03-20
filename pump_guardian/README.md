@@ -16,7 +16,10 @@ PumpGuardian is a production-style demo showing the difference between:
 - Synthetic vibration data generator (default 81 Hz fault pattern)
 - Live right-panel agent trace animation
 - **MiniMax** real LLM calls for narrative contrast (optional API key)
-- **Chinese / English** UI language toggle
+- **Chinese / English** UI language toggle (LLM prompts follow UI language)
+- **LLM raw I/O column** (chat-style + optional JSON payload) for side-by-side comparison
+- **Sample CSV** under `data/samples/` (download button in the app)
+- **Skill playbook** expander (progressive disclosure / industrial ROI narrative)
 
 ## MiniMax configuration
 
@@ -68,6 +71,11 @@ pump_guardian/
 |   |-- minimax_client.py
 |   |-- i18n.py
 |   |-- config.py
+|   |-- llm_parse.py
+|
+|-- docs/
+|   |-- skill_playbook_zh.md
+|   |-- skill_playbook_en.md
 |
 |-- skills/
 |   |-- bearing_analyzer/
@@ -81,6 +89,8 @@ pump_guardian/
 |
 |-- data/
 |   |-- generator.py
+|   |-- samples/
+|       |-- bearing_fault_81hz_demo.csv
 |
 |-- README.md
 ```
@@ -106,5 +116,6 @@ streamlit run app.py
 
 ## Expected Comparison
 
-- **General AI**: vague advice, no FFT chart, no ISO evidence, no work order
-- **Skill Agent**: full pipeline execution with trace, FFT visualization, ISO threshold match, and maintenance work order
+- **General AI**: generic LLM narrative + **raw request/response** panel; **no local tool pipeline**.  
+  If the model *happens* to emit parseable JSON spectrum / markdown-like work order text, the UI will render it (heuristic); otherwise it shows **explicit “not produced”** states to contrast with the skill path.
+- **Skill Agent**: full **tool + reference + template** pipeline (traceable), FFT + ISO evidence + standardized work order, plus an optional grounded LLM summary in the LLM column.

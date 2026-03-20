@@ -181,18 +181,24 @@ def minimax_api_key() -> Optional[str]:
     return s or None
 
 
+def iter_config_check_paths(app_dir: Path) -> List[tuple[str, Path]]:
+    """Ordered list of (label, path) checked for API / env configuration."""
+    items: List[tuple[str, Path]] = []
+    items.append((".env (app_dir)", app_dir / ".env"))
+    items.append((".env (cwd)", Path.cwd() / ".env"))
+    items.append((".env (parent)", app_dir.parent / ".env"))
+    items.append((".env.txt (app_dir)", app_dir / ".env.txt"))
+    items.append((".env.txt (cwd)", Path.cwd() / ".env.txt"))
+    items.append(("secrets.toml (app/.streamlit)", app_dir / ".streamlit" / "secrets.toml"))
+    return items
+
+
 def config_diagnostics(app_dir: Path) -> List[str]:
     """Human-readable lines for sidebar troubleshooting."""
     lines: List[str] = []
     lines.append(f"app_dir: {app_dir}")
     lines.append(f"cwd: {Path.cwd()}")
-    for label, p in [
-        (".env (app)", app_dir / ".env"),
-        (".env (cwd)", Path.cwd() / ".env"),
-        (".env (parent)", app_dir.parent / ".env"),
-        (".env.txt (app)", app_dir / ".env.txt"),
-        ("secrets.toml", app_dir / ".streamlit" / "secrets.toml"),
-    ]:
+    for label, p in iter_config_check_paths(app_dir):
         try:
             ok = p.resolve().is_file()
         except OSError:
